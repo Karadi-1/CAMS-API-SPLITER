@@ -1,0 +1,28 @@
+{
+  "name": "cams-webhook-splitter",
+  "version": "1.0.0",
+  "description": "API middleware webhook splitter between Camsunit Biometric Gateway and Sixorbit/Frappe ERPNext ERPs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_splitter.js",
+    "test:adversarial": "node test_splitter_adversarial.js"
+  },
+  "keywords": [
+    "webhook",
+    "splitter",
+    "camsunit",
+    "frappe",
+    "erpnext",
+    "sixorbit",
+    "middleware"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
