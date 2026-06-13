@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Security and Functionality Review</title>
+<style>body{font:16px system-ui;max-width:900px;margin:40px auto;padding:0 20px;color:#202124}h1,h2{color:#17365d}code{background:#f1f3f4;padding:2px 4px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:8px;text-align:left}.fixed{color:#137333}.risk{color:#b06000}</style></head>
+<body>
+<h1>Security and Functionality Review</h1>
+<p><strong>Date:</strong> 2026-06-13</p>
+<h2>Result</h2>
+<ul><li class="fixed">Two medium-severity findings fixed</li><li class="fixed">No open exploitable findings</li><li class="risk">One residual delivery-reliability risk</li><li>Tests blocked: <code>node</code> and <code>npm</code> unavailable</li></ul>
+<h2>Fixed Findings</h2>
+<h3>SEC-001: Unsupported target URL protocols</h3><p>Configured outbound URLs now accept only HTTP and HTTPS.</p>
+<h3>SEC-002: Forwarding without ERP credentials</h3><p>A target is now skipped unless its complete URL and credentials are configured.</p>
+<h2>Residual Risk</h2>
+<p class="risk">The service acknowledges before forwarding and has no durable queue. A process failure after acknowledgment can lose an event.</p>
+<h2>Functionality</h2>
+<p>Static review confirms authentication, token removal, immediate acknowledgment, concurrent forwarding, timeouts, body limits, and target-specific logging remain implemented. Runtime verification could not be performed because the Node.js runtime is unavailable.</p>
+</body></html>

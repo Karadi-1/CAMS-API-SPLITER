@@ -44,6 +44,9 @@ function forwardRequest(urlString, headers, payload) {
   return new Promise((resolve, reject) => {
     try {
       const url = new URL(urlString);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`Unsupported target URL protocol: ${url.protocol}`);
+      }
       const isHttps = url.protocol === 'https:';
       const client = isHttps ? https : http;
       const agent = isHttps ? httpsAgent : httpAgent;
@@ -118,31 +121,29 @@ function processForwarding(cleanedPayload) {
   const forwards = [];
 
   // BGC Sixorbit Forwarding Configuration
-  if (BGC_SIXORBIT_URL) {
-    const headers = {};
-    if (BGC_SIXORBIT_TOKEN) {
-      headers['Authorization'] = `Bearer ${BGC_SIXORBIT_TOKEN}`;
-    }
+  if (BGC_SIXORBIT_URL && BGC_SIXORBIT_TOKEN) {
+    const headers = {
+      'Authorization': `Bearer ${BGC_SIXORBIT_TOKEN}`
+    };
     forwards.push({
       name: 'BGC Sixorbit',
       promise: forwardRequest(BGC_SIXORBIT_URL, headers, cleanedPayload)
     });
   } else {
-    console.log('[Splitter] BGC Sixorbit URL is not configured. Forwarding skipped.');
+    console.error('[Splitter] BGC Sixorbit URL or token is not configured. Forwarding skipped.');
   }
 
   // SEMPL ERPNext Forwarding Configuration
-  if (SEMPL_ERPNEXT_URL) {
-    const headers = {};
-    if (SEMPL_ERPNEXT_API_KEY && SEMPL_ERPNEXT_API_SECRET) {
-      headers['Authorization'] = `token ${SEMPL_ERPNEXT_API_KEY}:${SEMPL_ERPNEXT_API_SECRET}`;
-    }
+  if (SEMPL_ERPNEXT_URL && SEMPL_ERPNEXT_API_KEY && SEMPL_ERPNEXT_API_SECRET) {
+    const headers = {
+      'Authorization': `token ${SEMPL_ERPNEXT_API_KEY}:${SEMPL_ERPNEXT_API_SECRET}`
+    };
     forwards.push({
       name: 'SEMPL ERPNext',
       promise: forwardRequest(SEMPL_ERPNEXT_URL, headers, cleanedPayload)
     });
   } else {
-    console.log('[Splitter] SEMPL ERPNext URL is not configured. Forwarding skipped.');
+    console.error('[Splitter] SEMPL ERPNext URL, API key, or API secret is not configured. Forwarding skipped.');
   }
 
   if (forwards.length === 0) {
