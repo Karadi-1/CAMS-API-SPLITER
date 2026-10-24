@@ -1,260 +1,113 @@
-/**
- * CAMS Webhook Splitter Server
- * Acts as a middleware between Camsunit Biometric Gateway and ERP systems.
- * Designed with zero external dependencies using the Node.js built-in 'http' and 'https' modules.
- */
+'use strict';
 
-const http = require('http');
-const https = require('https');
-const { URL } = require('url');
+const http = require('node:http');
+const { loadConfig } = require('./lib/config');
+const { InputError, decodeBody, readAttendance, adapt } = require('./lib/attendance');
+const { QueueStore } = require('./lib/store');
+const { DeliveryWorker } = require('./lib/delivery');
 
-// Load dotenv environment variables if available (for local development)
-try {
-  require('dotenv').config();
-} catch (e) {
-  // dotenv is optional; system env vars will be used in production (e.g. Render)
-}
-
-// Persistent Global HTTP/HTTPS Agents for connection reuse
-const httpAgent = new http.Agent({ keepAlive: true });
-const httpsAgent = new https.Agent({ keepAlive: true });
-
-// Environment Variables
-const PORT = process.env.PORT || 3000;
-const CAMS_AUTH_TOKEN = process.env.CAMS_AUTH_TOKEN;
-const BGC_SIXORBIT_URL = process.env.BGC_SIXORBIT_URL;
-const BGC_SIXORBIT_TOKEN = process.env.BGC_SIXORBIT_TOKEN;
-const SEMPL_ERPNEXT_URL = process.env.SEMPL_ERPNEXT_URL;
-const SEMPL_ERPNEXT_API_KEY = process.env.SEMPL_ERPNEXT_API_KEY;
-const SEMPL_ERPNEXT_API_SECRET = process.env.SEMPL_ERPNEXT_API_SECRET;
-
-// Startup Warning Logs
-if (!CAMS_AUTH_TOKEN) {
-  console.warn('[Warning] CAMS_AUTH_TOKEN environment variable is missing.');
-}
-if (!BGC_SIXORBIT_URL) {
-  console.warn('[Warning] BGC_SIXORBIT_URL environment variable is missing.');
-}
-if (!SEMPL_ERPNEXT_URL) {
-  console.warn('[Warning] SEMPL_ERPNEXT_URL environment variable is missing.');
-}
-
-// Helper function to send POST requests asynchronously
-function forwardRequest(urlString, headers, payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      const url = new URL(urlString);
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new Error(`Unsupported target URL protocol: ${url.protocol}`);
-      }
-      const isHttps = url.protocol === 'https:';
-      const client = isHttps ? https : http;
-      const agent = isHttps ? httpsAgent : httpAgent;
-
-      const bodyData = JSON.stringify(payload);
-
-      const options = {
-        hostname: url.hostname,
-        port: url.port || (isHttps ? 443 : 80),
-        path: url.pathname + url.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(bodyData),
-          ...headers
-        },
-        agent: agent,
-        timeout: 10000 // 10 seconds timeout limit
-      };
-
-      const req = client.request(options, (res) => {
-        res.setEncoding('utf8');
-        let responseBody = '';
-        let resDestroyed = false;
-        const MAX_RESPONSE_SIZE = 1024 * 1024; // 1MB limit
-
-        res.on('error', (err) => {
-          if (resDestroyed) return;
-          resDestroyed = true;
-          reject(err);
-        });
-
-        res.on('data', chunk => {
-          if (resDestroyed) return;
-          responseBody += chunk;
-          if (responseBody.length > MAX_RESPONSE_SIZE) {
-            resDestroyed = true;
-            res.destroy();
-            reject(new Error('Response payload too large'));
-          }
-        });
-
-        res.on('end', () => {
-          if (resDestroyed) return;
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve({ statusCode: res.statusCode, body: responseBody });
-          } else {
-            reject(new Error(`Server returned status code ${res.statusCode}`));
-          }
-        });
-      });
-
-      req.on('error', (err) => {
-        reject(err);
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Request timeout'));
-      });
-
-      req.write(bodyData);
-      req.end();
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// Function to handle forwarding payload concurrently
-function processForwarding(cleanedPayload) {
-  const forwards = [];
-
-  // BGC Sixorbit Forwarding Configuration
-  if (BGC_SIXORBIT_URL && BGC_SIXORBIT_TOKEN) {
-    const headers = {
-      'Authorization': `Bearer ${BGC_SIXORBIT_TOKEN}`
-    };
-    forwards.push({
-      name: 'BGC Sixorbit',
-      promise: forwardRequest(BGC_SIXORBIT_URL, headers, cleanedPayload)
-    });
-  } else {
-    console.error('[Splitter] BGC Sixorbit URL or token is not configured. Forwarding skipped.');
-  }
-
-  // SEMPL ERPNext Forwarding Configuration
-  if (SEMPL_ERPNEXT_URL && SEMPL_ERPNEXT_API_KEY && SEMPL_ERPNEXT_API_SECRET) {
-    const headers = {
-      'Authorization': `token ${SEMPL_ERPNEXT_API_KEY}:${SEMPL_ERPNEXT_API_SECRET}`
-    };
-    forwards.push({
-      name: 'SEMPL ERPNext',
-      promise: forwardRequest(SEMPL_ERPNEXT_URL, headers, cleanedPayload)
-    });
-  } else {
-    console.error('[Splitter] SEMPL ERPNext URL, API key, or API secret is not configured. Forwarding skipped.');
-  }
-
-  if (forwards.length === 0) {
-    console.log('[Splitter] No target servers configured for forwarding.');
-    return;
-  }
-
-  // Forward to all systems concurrently
-  Promise.allSettled(forwards.map(f => f.promise)).then((results) => {
-    results.forEach((result, index) => {
-      const targetName = forwards[index].name;
-      if (result.status === 'fulfilled') {
-        console.log(`Successfully forwarded payload to ${targetName}. Status code: ${result.value.statusCode}`);
-      } else {
-        console.error(`Failed to forward payload to ${targetName}. Error: ${result.reason.message}`);
-      }
-    });
-  }).catch((err) => {
-    console.error('[Splitter] Unexpected error in forwarding operation:', err);
-  });
-}
-
-// Main HTTP Server
-const server = http.createServer((req, res) => {
-  // Only accept POST requests on /webhook/cams
-  if (req.method === 'POST' && req.url === '/webhook/cams') {
-    const contentLength = req.headers['content-length'];
-    const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB limit
-
-    if (contentLength && parseInt(contentLength, 10) > MAX_PAYLOAD_SIZE) {
-      res.writeHead(413, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Payload Too Large' }));
-      req.destroy();
-      return;
-    }
-
-    let body = '';
-    let destroyed = false;
-    req.setEncoding('utf8');
-
-    req.on('data', chunk => {
-      if (destroyed) return;
-      body += chunk;
-      if (body.length > MAX_PAYLOAD_SIZE) {
-        destroyed = true;
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Payload Too Large' }));
-        req.destroy();
-      }
-    });
-
-    req.on('end', () => {
-      if (destroyed) return;
-      let payload;
+function createApp(config, options = {}) {
+  const log = options.log || ((event, details = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...details })));
+  const store = options.store || new QueueStore(config.dbPath);
+  const worker = new DeliveryWorker(store, config, log);
+  const counters = { accepted: 0, duplicate: 0, rejected: 0, storageFailures: 0 };
+  let stopping = false;
+  const json = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+  const done = res => json(res, 200, { status: 'done' });
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') return json(res, 200, { status: 'ok' });
+    if (req.method === 'GET' && req.url === '/readyz') {
       try {
-        payload = JSON.parse(body);
-      } catch (err) {
-        console.error('Failed to parse JSON payload:', err.message);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'done' }));
-        return;
-      }
-
-      // Check Authentication Token
-      const incomingToken = (payload && typeof payload === 'object') ? payload.AuthToken : undefined;
-      const isAuthorized = CAMS_AUTH_TOKEN && incomingToken === CAMS_AUTH_TOKEN;
-
-      // Always return 200 OK immediately with {"status": "done"}
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'done' }));
-
-      if (!isAuthorized) {
-        let maskedToken = 'None';
-        if (incomingToken !== undefined) {
-          const str = String(incomingToken);
-          maskedToken = str.length > 4 
-            ? `${str.slice(0, 2)}...${str.slice(-2)} (length: ${str.length})` 
-            : `*`.repeat(str.length) + ` (length: ${str.length})`;
-        }
-        console.warn(`Unauthorized access attempt. Provided token: ${maskedToken}`);
-        return;
-      }
-
-      // Strip AuthToken from payload for authorized request
-      let cleanedPayload = payload;
-      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-        const { AuthToken, ...rest } = payload;
-        cleanedPayload = rest;
-      }
-
-      // Trigger forwarding asynchronously
-      processForwarding(cleanedPayload);
+        const queue = store.summary();
+        return json(res, stopping || queue.counts.dead || queue.counts.pending + queue.counts.inflight >= config.maxQueue ? 503 : 200,
+          { status: stopping ? 'stopping' : queue.counts.dead ? 'attention_required' : 'ready', queue, counters });
+      } catch { return json(res, 503, { status: 'storage_unavailable' }); }
+    }
+    if (req.method !== 'POST' || req.url !== '/webhook/cams') return json(res, 404, { error: 'not_found' });
+    if (stopping) return json(res, 503, { error: 'stopping' });
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!config.encryptionKey && contentType !== 'application/json') return json(res, 415, { error: 'application_json_required' });
+    if (Number(req.headers['content-length']) > config.maxBytes) {
+      json(res, 413, { error: 'payload_too_large' }); req.resume(); return;
+    }
+    let bytes = 0, overLimit = false;
+    const chunks = [];
+    req.on('error', () => { /* Aborted uploads do not enter the durable queue. */ });
+    req.on('data', chunk => {
+      if (overLimit) return;
+      bytes += chunk.length;
+      if (bytes > config.maxBytes) { overLimit = true; chunks.length = 0; json(res, 413, { error: 'payload_too_large' }); }
+      else chunks.push(chunk);
     });
-  } else {
-    // 404 for other endpoints
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found' }));
-  }
-});
+    req.on('end', () => {
+      if (overLimit) return;
+      if (stopping) return json(res, 503, { error: 'stopping' });
+      let event;
+      try {
+        event = readAttendance(decodeBody(Buffer.concat(chunks), config), config);
+        if (event.rejected) {
+          counters.rejected++; log('callback_rejected', { reason: event.rejected }); done(res); return;
+        }
+      } catch (err) {
+        counters.rejected++; log('callback_rejected', { reason: err instanceof InputError ? err.message : 'invalid_payload' });
+        return json(res, err instanceof InputError ? err.status : 400, { error: err instanceof InputError ? err.message : 'invalid_payload' });
+      }
+      try {
+        const deliveries = config.targets.filter(t => event.targets.includes(t.id)).map(t => {
+          try { return { target: t.id, fingerprint: t.fingerprint, payload: adapt(event, t), source: event }; }
+          catch (err) {
+            // Keep the source event for repair/replay without losing the independently valid peer delivery.
+            if (!(err instanceof InputError)) throw err;
+            return { target: t.id, fingerprint: t.fingerprint, payload: null, source: event, error: err.message };
+          }
+        });
+        // FULL synchronous SQLite transaction commits both intended deliveries before acknowledging CAMS.
+        const inserted = store.enqueue(event.id, deliveries, config.maxQueue);
+        counters[inserted ? 'accepted' : 'duplicate']++;
+        done(res);
+        log(inserted ? 'callback_accepted' : 'callback_duplicate', { eventId: event.id, targets: event.targets });
+        setImmediate(() => worker.wake());
+      } catch {
+        counters.storageFailures++; log('callback_not_persisted', { eventId: event.id });
+        json(res, 503, { error: 'durable_acceptance_failed' });
+      }
+    });
+  });
+  server.requestTimeout = 15000;
+  server.headersTimeout = 10000;
+  server.maxConnections = 256;
+  server.setTimeout(15000, socket => socket.destroy());
 
-// Attach error listener to server
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`[Error] Port ${PORT} is already in use.`);
-  } else {
-    console.error('[Error] Server exception:', err);
+  async function start() {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
+    worker.start(); return server.address();
   }
-  process.exit(1);
-});
+  async function stop() {
+    if (stopping) return;
+    stopping = true;
+    const closed = new Promise(resolve => server.close(resolve));
+    server.closeIdleConnections();
+    const timer = setTimeout(() => server.closeAllConnections(), config.shutdownMs);
+    await Promise.all([closed, worker.stop()]); clearTimeout(timer); store.close();
+  }
+  return { server, store, worker, counters, start, stop };
+}
 
-// Start Server
-server.listen(PORT, () => {
-  console.log(`Splitter server listening on port ${PORT}`);
-});
+if (require.main === module) {
+  process.umask(0o077);
+  let app;
+  try {
+    app = createApp(loadConfig());
+    app.start().then(address => console.log(JSON.stringify({ event: 'listening', port: address.port }))).catch(() => {
+      console.error('Server startup failed (check port binding)'); app.store.close(); process.exitCode = 1;
+    });
+    for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+      app.stop().catch(() => { console.error('Graceful shutdown failed'); process.exitCode = 1; });
+    });
+  } catch (err) { console.error(`Configuration/startup failed: ${err.code ? 'storage_unavailable' : err.message}`); process.exitCode = 1; }
+}
+
+module.exports = { createApp };

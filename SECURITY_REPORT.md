@@ -1,3 +1,5 @@
+> Historical report from 13 June 2026. Its zero-open-findings/readiness statements are superseded by the version 2 implementation and regression tests. This file is retained as historical evidence, not current certification. See README.md and TEST_INFRA.md.
+
 # Security and Functionality Review
 
 Date: 2026-06-13

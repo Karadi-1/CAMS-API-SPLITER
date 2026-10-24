@@ -12,3 +12,11 @@ logs/
 # System files
 .DS_Store
 Thumbs.db
+
+# Durable attendance queue and SQLite sidecars (never commit operational data)
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+coverage/
