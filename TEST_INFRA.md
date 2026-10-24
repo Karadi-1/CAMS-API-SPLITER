@@ -1,100 +1,25 @@
-# E2E Test Suite Design (TEST_INFRA.md)
+# Verification architecture
 
-This document proposes the architecture and design of the End-to-End (E2E) verification test suite for the Node.js Webhook Splitter API.
+The maintained suites use `node:test`, Node HTTP mocks bound to loopback on ephemeral ports, and a temporary SQLite file per integration test. They require Node 22.16+ or 24 and no live credentials or network destinations. Tests clean up their workers, connections and temporary data.
 
-## 1. Overview & Goals
-The objective is to verify that the Webhook Splitter API correctly accepts biometric gateway requests, authenticates them, returns an immediate response, strips authorization fields, and forwards the cleaned payload concurrently to BGC Sixorbit and SEMPL ERPNext, while handling target service failures gracefully.
-
-To satisfy the **CODE_ONLY network mode** constraint, the test suite is designed with **zero external dependencies**, utilizing only Node.js built-in modules (`node:http`, `node:assert`, `node:child_process`, `node:test`). This makes the test suite completely self-contained, offline-compatible, and extremely fast.
-
----
-
-## 2. Test Architecture
-
-The E2E test suite operates by setting up a local sandboxed environment containing:
-1. **Splitter Server Process**: The actual application `server.js` run as a child process.
-2. **Mock BGC Sixorbit Server**: A local HTTP server listening on a mock port (e.g., `3001`).
-3. **Mock SEMPL ERPNext Server**: A local HTTP server listening on a mock port (e.g., `3002`).
-4. **Test Runner**: A script that sends test payloads to the Splitter Server, manipulates the behavior of the Mock target servers, and asserts the correctness of responses, headers, forward payloads, and logs.
-
-```
-                           +------------------------+
-                           |      Test Runner       |
-                           +-----+------------+-----+
-                                 |            |
-                1. POST Webhook  |            | 4. Assert requests
-                (with AuthToken) |            |    received & logs
-                                 v            v
-                        +---------+----+  +----+--------------+
-                        |   Splitter   |  | Mock Target       |
-                        |  Server API  |  | Servers           |
-                        | (port 3000)  |  | (ports 3001/3002) |
-                        +---------+----+  +----+--------------+
-                                 |            ^
-                                 |            |
-                                 +------------+
-                               2. Async Forward
-                               (AuthToken stripped,
-                                 target auth headers)
+```sh
+npm ci --ignore-scripts
+npm run check
+npm test
+npm run test:adversarial
 ```
 
----
+Legacy entry points remain: `node test_splitter.js` runs integration tests; `node test_splitter_adversarial.js` and `node test_adversarial.js` run adversarial tests. They no longer assert that 5–10 MB bodies should be accepted. The concurrency test measures receipt separately from completion: both mocks may receive promptly while one delays its response.
 
-## 3. Tier 1-4 Test Suite Case Mapping
+## Coverage
 
-The test suite systematically covers all requirements across four validation tiers:
+- `test/attendance.test.js`: actual CAMS envelope, strict auth values, root/RealTime ambiguity, allowlisted fields and credential/template exclusion, explicit flat compatibility, stable physical event identity, calendar/timezone parsing, midnight handling, adapters, device/employee mapping, encryption and startup validation.
+- `test/integration.test.js`: committed rows visible to an independent SQLite reader before acknowledgment; auth headers and payload mapping; exact-byte Sixorbit API-Key/HMAC signing and credential separation; independent target completion/logging; retries without repeating a successful peer; restart and SIGKILL recovery; storage failure; dead-letter replay and explicit contract rebinding; unmapped Frappe types; per-device routing; capacity; encrypted callbacks; probes; 50 concurrent unique events.
+- `test/adversarial.test.js`: object-token crash regression; malformed/ambiguous/non-attendance payloads; deep and prototype-shaped subtrees; received-byte bounds for chunked multibyte input; abrupt uploads; drip-fed and aborted responses; HTTP/application failures; response size limits; native Frappe acceptance criteria.
+- `test/queue.test.js`: actual operator CLI status/replay/rebuild, completed-target protection, private queue file permissions, and atomic rollback of a failed partial enqueue.
 
-### Tier 1: Immediate Acknowledgment and Authentication Check
-*   **Case 1.1: Valid Request Acknowledgment**
-    *   *Input*: POST request with valid `AuthToken`.
-    *   *Assertion*: Returns HTTP 200 OK with body `{"status": "done"}` immediately (< 50ms), before target forwards resolve.
-*   **Case 1.2: Invalid Token Handling**
-    *   *Input*: POST request with incorrect `AuthToken`.
-    *   *Assertion*: Returns HTTP 200 OK with body `{"status": "done"}` immediately (< 50ms). No payloads are forwarded to target servers.
-*   **Case 1.3: Missing Token Handling**
-    *   *Input*: POST request without `AuthToken`.
-    *   *Assertion*: Returns HTTP 200 OK with body `{"status": "done"}` immediately. No payloads are forwarded to target servers.
+CI runs syntax and the full suite on Node 22 and 24. Success is represented by the test process exit status, not static review labels. No test launches real CAMS or ERP calls. Test timing tolerances isolate waiting for an ERP response; hosted under-50-ms acceptance remains a staging measurement.
 
-### Tier 2: Payload Cleaning and Headers Verification
-*   **Case 2.1: Target Forward Payload Integrity**
-    *   *Assertion*: Target servers receive the identical `data` structure sent by the client.
-*   **Case 2.2: AuthToken Redaction**
-    *   *Assertion*: The `AuthToken` field is successfully stripped from the body forwarded to both target servers.
-*   **Case 2.3: BGC Sixorbit Authentication Headers**
-    *   *Assertion*: BGC Sixorbit mock server receives the header `Authorization: Bearer <BGC_SIXORBIT_TOKEN>`.
-*   **Case 2.4: SEMPL ERPNext Authentication Headers**
-    *   *Assertion*: SEMPL ERPNext mock server receives the header `Authorization: token <SEMPL_ERPNEXT_API_KEY>:<SEMPL_ERPNEXT_API_SECRET>`.
+## Required staging evidence
 
-### Tier 3: Concurrency and Resiliency (Non-blocking Delivery)
-*   **Case 3.1: Asynchronous Concurrency**
-    *   *Setup*: BGC Sixorbit mock server is configured with a 100ms response delay. SEMPL ERPNext responds instantly.
-    *   *Assertion*: SEMPL ERPNext receives and processes the request immediately without waiting for BGC Sixorbit's delay.
-*   **Case 3.2: Single-Target Offline Resilience (BGC Offline)**
-    *   *Setup*: BGC Sixorbit mock server is offline/unresponsive (simulating socket connection reset/destroy). SEMPL ERPNext is online.
-    *   *Assertion*: SEMPL ERPNext successfully receives the forward. The Splitter does not crash.
-*   **Case 3.3: Single-Target Offline Resilience (SEMPL Offline)**
-    *   *Setup*: SEMPL ERPNext mock server is offline/unresponsive. BGC Sixorbit is online.
-    *   *Assertion*: BGC Sixorbit successfully receives the forward. The Splitter does not crash.
-*   **Case 3.4: All-Targets Offline Resilience**
-    *   *Setup*: Both target servers are offline/unresponsive.
-    *   *Assertion*: The Splitter still responds with 200 OK immediately and handles the forward failures without crashing.
-
-### Tier 4: Resiliency, Logging, and Error Handling
-*   **Case 4.1: Success Logging**
-    *   *Assertion*: On successful forwarding, the Splitter logs a message containing the target name (e.g. `BGC Sixorbit` and `SEMPL ERPNext`).
-*   **Case 4.2: Failure Logging**
-    *   *Assertion*: On forwarding failures, the Splitter logs target failures with the target name and the specific error message/status code.
-*   **Case 4.3: DNS/Network Exception Handling**
-    *   *Setup*: Splitter is configured with invalid/malformed target URLs.
-    *   *Assertion*: Splitter process handles the DNS or connection errors asynchronously, logs the failures, and does not crash.
-
----
-
-## 4. Execution Workflow
-
-To run the verification test suite:
-1.  **Configure environment variables**: Setup target mock ports and auth credentials.
-2.  **Start Mock Servers**: Listen on ports `3001` and `3002`.
-3.  **Spawn Splitter API**: Executed as a background process with stdout/stderr piped to capture log outputs.
-4.  **Execute Assertions**: The client makes HTTP calls for each test case, modifies mock server behaviors, and performs validations.
-5.  **Shutdown**: Cleanly terminate the Splitter server process and close the mock server ports to prevent resource leaks.
+Real account-shaped redacted callbacks, verified tenant/employee permissions, record creation in both intended ERPs, response-loss duplicate handling, outage/restart recovery, actual disk durability/backup restore, reverse-proxy behaviour and hosted latency must be checked before callback cutover. See DEPLOYMENT_INSTRUCTIONS.md.

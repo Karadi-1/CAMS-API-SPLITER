@@ -1,178 +1,55 @@
-# CAMS Webhook Splitter — Team Guide & Deployment Instructions
+# Deployment and migration — version 2
 
-This document provides detailed instructions for the development, QA, and DevOps teams to set up, test, configure, and deploy the **CAMS Webhook Splitter API** middleware.
+This guide replaces the June 2026 instant-deployment advice. A passing mock test suite is not proof of a live ERP integration. The maintained contracts and recovery behaviour are in [README.md](README.md).
 
----
+## Prepare contracts and hosting
 
-## 1. Overview & Architecture
+1. Identify each CAMS device/serial and company ownership. Capture redacted real attendance and any relevant break/meal/overtime callbacks. Compare them with the supported `RealTime.PunchLog` schema. Confirm token and optional encryption settings. Use per-device registry credentials when devices have different tokens.
+2. Obtain the **actual Sixorbit endpoint and receiving schema**, its authorization method, employee identifier and response acceptance rule. The service supports the original requested Bearer header and the SO Framework external API's API-Key/HMAC signature scheme via `BGC_SIXORBIT_AUTH_MODE`. Confirm which applies to the attendance receiver; framework docs alone do not identify that route or tenant. The repository does not invent a Sixorbit API URL.
+3. Verify SEMPL's exact tenant URL, installed Frappe/HRMS version and Employee Checkin method. Current Frappe HR documents `/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field`; that is a candidate route to verify on the intended tenant, not an assumed endpoint. Custom CAMS receivers can use `cams-json` or `mapped-json` instead.
+4. Establish employee Attendance Device IDs and optional device-scoped lookup mappings. Verify uniqueness and company permissions. Approve native Frappe punch-type mappings, shift/auto-attendance setup and original timestamp timezone. The company label in this service is not an ERP permission boundary.
+5. Select a long-lived single-instance Node 22.16+ or 24 service and a **mounted durable local disk**. Run the queue outside the Git checkout and outside OneDrive/network-synchronised folders. Set `QUEUE_DB_PATH` to an absolute file path on that disk. Do not use ephemeral serverless compute or replicas with separate local queues. Confirm filesystem flush durability, disk capacity, backup encryption and restore procedure with the host.
 
-Camsunit Biometric Gateway pushes real-time attendance punch logs via webhooks but allows only a single callback URL per device. This middleware acts as a high-performance, resilient router that intercepts incoming webhooks, validates credentials, instantly returns a success response, and concurrently duplicates the payload to both ERP systems:
+## Configure and stage
 
-```
-                            +------------------------+
-                            |   Camsunit Gateway     |
-                            +-----------+------------+
-                                        |
-                         1. POST Webhook| 2. Immediate 200 OK Response
-                         (with Token)   |    {"status": "done"} (<50ms)
-                                        v
-                            +-----------+------------+
-                            | Webhook Splitter API   |
-                            | (Node.js Keep-Alive)   |
-                            +-----+------------+-----+
-                                  |            |
-           3a. POST Clean Body    |            | 3b. POST Clean Body
-           (Bearer Authorization) |            | (Token API_KEY:SECRET)
-                                  v            v
-                            +-----+----+  +----+--------------+
-                            | Sixorbit |  | Frappe ERPNext    |
-                            | (Company |  | (Company SEMPL)   |
-                            |  A - BGC)|  +-------------------+
-                            +----------+
-```
-
-### Key Technical Specs:
-* **Zero Dependencies**: Implemented natively using Node.js core modules (`http`, `https`, `url`, `assert`, `child_process`). Does not require `express` or `axios`, reducing security vulnerabilities and start-up latency.
-* **Socket Reuse**: Persistent keep-alive connections are established via custom HTTP/HTTPS global agents to avoid TCP socket exhaustion.
-* **Immediate Acknowledgment**: Flushes an HTTP `200` with `{"status": "done"}` immediately upon parsing the incoming webhook body to prevent the biometric device from triggering retries.
-* **Authentication**: Incoming requests are verified using the `AuthToken` field in the JSON body. If unauthorized, the event is logged (with credentials masked to prevent log-based token exposure) and skipped from forwarding, but still returns `200 OK` to satisfy Camsunit's retry suppression logic.
-* **Resiliency**: Webhooks are dispatched concurrently using `Promise.allSettled`. If one ERP server times out, goes offline, or returns a `500` error, the other ERP's delivery is unaffected.
-
----
-
-## 2. File Deliverables in the Repository
-
-Your workspace contains:
-1. `server.js`: Webhook splitter server logic.
-2. `package.json`: Project manifest (includes scripts for Render and local development).
-3. `.env.example`: Env configuration template.
-4. `.gitignore`: Ignores `.env` and local package builds.
-5. `test_splitter.js`: Primary E2E test runner covering 14 core functional cases and 6 security edge cases.
-6. `test_splitter_adversarial.js`: Verifies target server timeouts, connection drops, and TCP resets.
-7. `test_adversarial.js`: Stress tests the middleware with large payloads, concurrent load spikes, and malformed inputs.
-8. `TEST_INFRA.md` & `TEST_READY.md`: Test architecture and coverage details.
-
----
-
-## 3. Configuration & Environment Variables
-
-Create a `.env` file in the root directory:
-```bash
+```sh
+npm ci --ignore-scripts
+npm run check
+npm test
 cp .env.example .env
+# Supply real staging contract values, scoped staging credentials and persistent queue path.
+npm start
 ```
 
-Set the following variables:
+Use `NODE_ENV=production` on the deployed service; both ERP URLs must use HTTPS. Expose inbound HTTPS with a valid certificate and bounded body/upload time at the reverse proxy. For local HTTP mocks only, use a development environment. The process uses the hosting provider's `PORT` if set.
 
-| Variable Name | Required | Default | Description |
-|---|---|---|---|
-| `PORT` | No | `3000` | Port the splitter API server will listen on. |
-| `CAMS_AUTH_TOKEN` | Yes | - | Authentication token expected from the Camsunit portal. |
-| `BGC_SIXORBIT_URL` | Yes | - | Endpoint URL for the Sixorbit (BGC) attendance route. |
-| `BGC_SIXORBIT_TOKEN` | Yes | - | Bearer token for Sixorbit (`Authorization: Bearer <TOKEN>`). |
-| `SEMPL_ERPNEXT_URL` | Yes | - | Endpoint URL for the Frappe ERPNext (SEMPL) route. |
-| `SEMPL_ERPNEXT_API_KEY` | Yes | - | API Key for Frappe integration. |
-| `SEMPL_ERPNEXT_API_SECRET`| Yes | - | API Secret for Frappe integration (`Authorization: token <KEY>:<SECRET>`). |
+- Set the exact `/webhook/cams` URL; query strings/trailing slashes are not accepted aliases.
+- Plaintext callbacks require `Content-Type: application/json`. With CAMS payload encryption enabled, configure the same key bytes as `CAMS_ENCRYPTION_KEY_HEX` and test the raw Base64 vendor format.
+- `cams-json` now contains only scalar attendance fields and excludes the CAMS token and biometric data. An existing receiver must use the separately supplied Authorization header and accept the sanitised schema.
+- `mapped-json` requires a field map and verified response path/value. `frappe-checkin` expects a returned Employee Checkin `message.name`. Confirm error and duplicate behaviour. Do not count HTTP 200 alone as success.
+- The old arbitrary `{AuthToken,data:{...}}` format is no longer a supported generic relay. Root-level **attendance** payloads require `CAMS_ALLOW_LEGACY_FLAT=true` and the documented SerialNumber/PunchLog fields.
+- Configure callback Handle Response according to CAMS documentation and test how 503/non-done responses are retried. Authorised work is acknowledged only after durable commit. Invalid auth and non-attendance events are observed and acknowledged without ERP delivery. Review rejection logs/counters.
 
----
+Verify synthetic records independently in each staging ERP: correct company and employee, original punch time, timezone, direction, record ID and shift behaviour. Test BGC down/SEMPL up, the reverse, both down, credential failure, response loss after commit, duplicate/resend, forced process death, disk failure and failed-target replay. Native Frappe reconciles failed POSTs through exact Employee and Employee Checkin REST read-back; grant scoped read/list permissions and test commit/response-loss recovery and lookup outage/restart on the installed tenant. Generic receivers still require their own idempotency contract.
 
-## 4. How to Run Locally
+Measure hosted acknowledgment latency, including SQLite durable writes and reverse-proxy/TLS cost. The original normal-under-50-ms target needs real measurement. Monitor queue throughput and oldest age: one serial worker per target deliberately bounds connections and preserves persisted arrival order; it must meet actual punch volume.
 
-### Option A: Using Modern Node.js (Recommended)
-If your team is running **Node.js 20.6.0 or higher**, you can load environment variables directly from `.env` without installing any NPM packages:
-```bash
-node --env-file=.env server.js
-```
+## Operations
 
-### Option B: Using standard script
-For environments running older versions of Node.js:
-1. Install dependencies (installs the optional `dotenv` library):
-   ```bash
-   npm install
-   ```
-2. Start the server:
-   ```bash
-   npm start
-   ```
+- Probe `/healthz` for liveness. Monitor `/readyz` for storage, backlog and dead-work attention; a 503 due to an old failed delivery must not trigger endless restarts or automatically prevent new recoverable callbacks reaching the app. Restrict probe endpoints at the proxy.
+- Configure external alerts for dead count, queue age, rejection count, storage failures and disk space. Built-in counters are per-process; delivery state is durable. This repository does not install an alerting provider.
+- Inspect `npm run queue -- status`. Replay one dead destination after fixing its credentials/availability. A changed receiver contract requires an explicit fingerprint-confirmed rebuild; see README. Do not reset successful peer deliveries or delete the database as a retry mechanism.
+- Pending/dead payloads contain attendance only. Successful payloads/source are cleared; event tombstones and receiver IDs remain. Define retention, encrypted backups, access and reconciliation ownership. SQLite deletion does not guarantee forensic erasure from prior WAL pages/backups.
+- Handle SIGTERM with a host grace period longer than `SHUTDOWN_TIMEOUT_MS`. Hard crashes recover inflight claims after the delivery timeout plus two seconds for generic receivers, or three delivery timeouts plus two seconds for native Frappe POST and read-back. Repeated POSTs remain possible after an ambiguous response; native Frappe reconciles exact existing records, while generic receivers require idempotency.
+- Before changing receiver URL/company/mapping/timezone, drain or review queued work. The fingerprint prevents silent retargeting. Credential rotations preserve the original binding.
 
----
+## Cutover and rollback
 
-## 5. Verification & Testing Guide
+1. Obtain review/approval for the tested candidate and verified account/tenant bindings.
+2. Back up the previous callback settings, deploy the exact candidate with its persistent disk and verify readiness. Avoid overlapping active old/new consumers unless duplicate handling has been proven.
+3. Switch only the approved CAMS devices to the new callback. Record the cutover time and reconcile punch counts/created records in both ERPs. Leave unrelated company settings untouched.
+4. On rollback, stop acceptance and drain/preserve the new queue before restoring the prior callback. Retain its database for outstanding deliveries and reconciliation. Do not run an old fire-and-forget version against the new queue or discard pending attendance.
 
-To verify correctness before deploying, run the test suites locally. The testing framework requires no setup, database, or external networks because it launches local mock servers on ports `13001` and `13002` to validate payloads.
+No live portal change, ERP write or production deployment is implied by this guide or the PR.
 
-### Command Execution:
-
-1. **Standard E2E Tests (20 Test Cases)**:
-   ```bash
-   node test_splitter.js
-   ```
-   *Verifies:* Endpoint validation, correct acknowledgment, payload parsing, `AuthToken` stripping, header creation, concurrent routing, offline targets, and 1MB size caps.
-   
-2. **Network Resilience & TCP Reset Tests**:
-   ```bash
-   node test_splitter_adversarial.js
-   ```
-   *Verifies:* Behavior under network drops, target server hangs, socket closures, and TCP reset errors.
-
-3. **Stress & Payload Injections**:
-   ```bash
-   node test_adversarial.js
-   ```
-   *Verifies:* High concurrency loads (50 simultaneous requests), malicious JSON formatting, and memory resilience.
-
----
-
-## 6. Production Deployment Steps (Render)
-
-This application is ready for instant deployment to cloud platforms like **Render**, **Heroku**, or **AWS ECS**. Follow these steps for Render:
-
-1. **Create Web Service**:
-   - Link your Git repository on Render.
-   - Set **Runtime** to `Node`.
-   - Set **Build Command** to `npm install` (optional, as the server uses core modules).
-   - Set **Start Command** to `node server.js`.
-
-2. **Configure Variables**:
-   - Go to the **Environment** tab on Render.
-   - Add all env variables defined in `.env.example` (e.g. `CAMS_AUTH_TOKEN`, `BGC_SIXORBIT_URL`, etc.).
-
-3. **Scale Settings**:
-   - The keep-alive agent is configured internally. Do not run behind proxies that force HTTP/1.0 connections or strip the `Keep-Alive` header.
-
----
-
-## 7. Camsunit Gateway Setup
-
-Once the API is deployed, configure the webhook in the Camsunit developer portal:
-
-1. Set the **Callback URL** to:
-   ```
-   https://your-render-app-domain.com/webhook/cams
-   ```
-2. Define the **AuthToken** in the portal to match the `CAMS_AUTH_TOKEN` string specified in your production environment variables.
-
----
-
-## 8. Log Reference & Troubleshooting
-
-### Successful Delivery Log:
-```text
-Splitter server listening on port 3000
-Successfully forwarded payload to BGC Sixorbit. Status code: 200
-Successfully forwarded payload to SEMPL ERPNext. Status code: 200
-```
-
-### Unauthorized Request Log (Token Masked):
-```text
-Unauthorized access attempt. Provided token: ab...yz (length: 12)
-```
-
-### Payload Size Exceeded (HTTP 413):
-The server automatically blocks payloads exceeding 1MB (to mitigate memory exhaustion DoS) and closes the socket immediately. The logs will indicate the closed connection.
-
-### Address Conflict (`EADDRINUSE`):
-If the server fails to bind because the port is occupied, it outputs:
-```text
-[Error] Port 3000 is already in use.
-```
-To fix, change the `PORT` variable in `.env` or terminate the process occupying the port.
+Primary references: [CAMS setup and response handling](https://forum.camsbiometrics.com/comprehensive-user-guide-for-api-configuration-with-biometric-machines-and-admin-tools-a-first-time-setup-guide/), [Frappe biometric integration](https://docs.frappe.io/hr/integrating-frappe-hr-with-biometric-attendance-devices).
