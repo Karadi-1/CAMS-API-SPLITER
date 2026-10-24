@@ -4,7 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { createCipheriv } = require('node:crypto');
+const { createCipheriv, createHmac } = require('node:crypto');
+const { loadConfig } = require('../lib/config');
 const { QueueStore } = require('../lib/store');
 const { readAttendance, adapt } = require('../lib/attendance');
 const { setup, fixture, sleep, until } = require('./helpers');
@@ -176,4 +177,23 @@ test('50 concurrent unique callbacks persist and each destination receives every
   await until(() => ctx.app.store.summary().counts.delivered === 100);
   assert.deepEqual(ctx.states.map(s => s.hits.length), [50, 50]);
   assert.equal(ctx.app.store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 50);
+});
+
+test('Sixorbit external API mode signs exact UTF-8 request bytes and preserves the independent Frappe contract', async t => {
+  const key = 'synthetic-sixorbit-api-key';
+  const ctx = await setup(t, { BGC_SIXORBIT_AUTH_MODE: 'api-key-hmac', BGC_SIXORBIT_API_KEY: key, BGC_SIXORBIT_TOKEN: '' });
+  const payload = fixture({ LabelName: 'Synthetic café 中文' });
+  await ctx.post(payload); await until(() => ctx.app.store.summary().counts.delivered === 2);
+  const [bgc, sempl] = ctx.states.map(s => s.hits[0]);
+  assert.equal(bgc.headers['api-key'], key);
+  assert.equal(bgc.headers['x-api-signature'], createHmac('sha256', key).update(bgc.rawBody, 'utf8').digest('hex'));
+  assert.equal(bgc.headers.authorization, undefined);
+  assert.equal(Number(bgc.headers['content-length']), Buffer.byteLength(bgc.rawBody));
+  assert.equal(sempl.headers.authorization, 'token test-key:test-secret');
+  assert.equal(sempl.headers['api-key'], undefined); assert.equal(sempl.headers['x-api-signature'], undefined);
+  assert.equal(loadConfig({ ...ctx.env, BGC_SIXORBIT_API_KEY: 'rotated-key' }).targets[0].fingerprint, ctx.config.targets[0].fingerprint);
+  assert.notEqual(loadConfig({ ...ctx.env, BGC_SIXORBIT_AUTH_MODE: 'bearer', BGC_SIXORBIT_TOKEN: 'token' }).targets[0].fingerprint, ctx.config.targets[0].fingerprint);
+  const invalid = { ...ctx.env }; delete invalid.BGC_SIXORBIT_API_KEY; assert.throws(() => loadConfig(invalid), /Missing BGC_SIXORBIT_API_KEY/);
+  assert.throws(() => loadConfig({ ...ctx.env, BGC_SIXORBIT_AUTH_MODE: 'invalid' }), /Invalid BGC_SIXORBIT_AUTH_MODE/);
+  assert.ok(!JSON.stringify(ctx.logs).includes(key));
 });

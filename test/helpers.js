@@ -43,7 +43,8 @@ async function setup(t, overrides = {}) {
       req.on('data', c => chunks.push(c));
       req.on('error', () => {});
       req.on('end', () => {
-        state.hits.push({ body: JSON.parse(Buffer.concat(chunks).toString()), headers: req.headers, at: Date.now() });
+        const rawBody = Buffer.concat(chunks).toString('utf8');
+        state.hits.push({ body: JSON.parse(rawBody), rawBody, headers: req.headers, at: Date.now() });
         if (state.handle) return state.handle(req, res);
         const code = state.code, body = state.body;
         const timer = setTimeout(() => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); }, state.delay);
