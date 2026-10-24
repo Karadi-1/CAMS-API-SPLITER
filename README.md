@@ -78,6 +78,8 @@ Every request also carries `Idempotency-Key: <event-id>`. No redirects are follo
 
 Native Frappe defaults to mapping CheckIn/CheckOut only. Unmapped break/meal/overtime events remain as dead SEMPL deliveries for explicit mapping/rebuild, while BGC can still succeed. Approve `SEMPL_ERPNEXT_PUNCH_TYPE_MAP_JSON` semantics before enabling these types. Generic mapped `logType` uses the event's In/Out suffix; use `punchType` when the receiver must distinguish breaks and overtime.
 
+For native Frappe ingestion tests, `SEMPL_ERPNEXT_SKIP_AUTO_ATTENDANCE=true` sends `skip_auto_attendance=1` so the test check-ins do not participate in automatic daily attendance calculation. The default is false and leaves the native method's normal behaviour intact. This setting is part of the pinned delivery contract; it is independent of employee/device routing.
+
 ## Delivery guarantees and recovery
 
 SQLite WAL with `synchronous=FULL` commits event identity plus target payloads atomically. Deploy a **single service instance on a durable local mounted disk**, with tested backup/restore; do not put the queue in an ephemeral filesystem, Git, OneDrive, a network share, or separate per-instance disks. Database and sidecars contain attendance while pending; protect the host and use encrypted storage/backups. Size the disk for expected outage backlog and monitor it.

@@ -69,6 +69,15 @@ test('employee mapping keys cannot collide across colon-containing identities; m
   assert.throws(() => readAttendance(bad, cfg), /invalid_user/);
 });
 
+test('staging check-ins can explicitly skip auto attendance without changing the production default', () => {
+  const base = config(), staging = loadConfig({ ...baseEnv('/tmp/synthetic.sqlite'), SEMPL_ERPNEXT_SKIP_AUTO_ATTENDANCE: 'true' });
+  const event = readAttendance(fixture(), staging);
+  assert.equal(adapt(event, staging.targets[1]).skip_auto_attendance, 1);
+  assert.equal(adapt(event, base.targets[1]).skip_auto_attendance, undefined);
+  assert.equal(adapt(event, staging.targets[0]).RealTime.PunchLog.UserId, 'EMP-1');
+  assert.throws(() => loadConfig({ ...baseEnv('/tmp/synthetic.sqlite'), SEMPL_ERPNEXT_SKIP_AUTO_ATTENDANCE: 'yes' }));
+});
+
 test('optional AES-256-ECB callbacks decode before authentication; wrong keys and invalid UTF-8 fail closed', () => {
   const cfg = config(); cfg.encryptionKey = '01'.repeat(32);
   const cipher = createCipheriv('aes-256-ecb', Buffer.from(cfg.encryptionKey, 'hex'), null);
