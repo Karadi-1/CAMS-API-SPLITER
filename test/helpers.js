@@ -37,12 +37,18 @@ async function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cams-test-'));
   const states = [];
   for (const id of ['bgc', 'sempl']) {
-    const state = { id, hits: [], delay: 0, code: 200, body: id === 'bgc' ? { success: true } : { message: { name: 'CHECKIN-1' } } };
+    const state = { id, hits: [], reads: [], delay: 0, code: 200, body: id === 'bgc' ? { success: true } : { message: { name: 'CHECKIN-1' } } };
     state.server = http.createServer((req, res) => {
       const chunks = [];
       req.on('data', c => chunks.push(c));
       req.on('error', () => {});
       req.on('end', () => {
+        if (req.method === 'GET') {
+          state.reads.push({ url: req.url, headers: req.headers });
+          if (state.readHandle) return state.readHandle(req, res);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ data: [] }));
+        }
         const rawBody = Buffer.concat(chunks).toString('utf8');
         state.hits.push({ body: JSON.parse(rawBody), rawBody, headers: req.headers, at: Date.now() });
         if (state.handle) return state.handle(req, res);
